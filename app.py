@@ -3,338 +3,430 @@ import io
 import time
 import json
 import re
+from typing import Any, Dict, List
+
 import streamlit as st
 import pandas as pd
 import pdfplumber
-from groq import Groq
 
+# Optional providers; import only if installed on your environment
+try:
+    from groq import Groq
+except Exception:
+    Groq = None
 
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
 
+# ---------------------------
+# Page config
+# ---------------------------
 st.set_page_config(
-    page_title="AI Resume Screening",
-    page_icon="🧠",
-    layout="wide"
+    page_title="HR ATS — Resume Screener",
+    page_icon="🧾",
+    layout="wide",
 )
 
+# ---------------------------
+# Professional styling 
+# ---------------------------
 st.markdown(
-    "<h2 style='font-family:Segoe UI;'>🧠 AI-Powered Resume Screening Tool</h2>",
-    unsafe_allow_html=True
-)
-st.markdown(
-    "<p style='color:#475569;'>Upload a Job Description and multiple resumes. "
-    "The system will automatically evaluate, score, and extract key HR insights.</p>",
-    unsafe_allow_html=True
+    """
+    <style>
+    :root {
+        --bg: #0b1220;
+        --card: #0f1724;
+        --muted: #9aa4b2;
+        --accent: #5661f9;
+        --accent-2: #07b59b;
+        --surface-2: #111827;
+        --white: #eef2ff;
+    }
+
+    .stApp {
+        background: linear-gradient(180deg, var(--bg) 0%, #041023 100%);
+        color: var(--white);
+        font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont;
+    }
+
+    .header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 6px 18px 6px;
+    }
+    .brand {
+        display:flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .brand-logo {
+        width:48px;
+        height:48px;
+        border-radius:10px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        background: linear-gradient(135deg, rgba(86,97,249,0.18), rgba(7,181,155,0.08));
+        font-weight:700;
+        color: var(--white);
+        box-shadow: 0 6px 18px rgba(7,11,20,0.6);
+    }
+    .brand-title {
+        font-size:20px;
+        font-weight:700;
+        margin:0;
+        color: var(--white);
+    }
+    .brand-sub {
+        font-size:12px;
+        color: var(--muted);
+        margin-top:2px;
+    }
+
+    .panel {
+        background: var(--card);
+        border-radius: 12px;
+        padding: 18px;
+        border: 1px solid rgba(255,255,255,0.03);
+        box-shadow: 0 10px 30px rgba(2,6,23,0.6);
+    }
+    .input-card {
+        background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+        border-radius: 10px;
+        padding: 14px;
+        border: 1px solid rgba(255,255,255,0.03);
+    }
+    .card-title {
+        font-weight:700;
+        color:var(--white);
+        margin-bottom:6px;
+        font-size:15px;
+    }
+    .card-desc {
+        margin:0 0 10px 0;
+        color: var(--muted);
+        font-size:13px;
+    }
+
+    .helper {
+        color: var(--muted);
+        font-size:12px;
+        margin-top:6px;
+    }
+
+    .stButton>button {
+        background: linear-gradient(90deg, var(--accent), #15b1e6);
+        color: white;
+        font-weight: 600;
+        padding: 8px 14px;
+        border-radius: 10px;
+        box-shadow: 0 8px 26px rgba(86,97,249,0.16);
+    }
+
+    [data-testid="stExpander"] {
+        border-radius: 10px;
+        background: var(--surface-2) !important;
+        color: var(--white);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
+# ---------------------------
+# Header
+# ---------------------------
+with st.container():
+    st.markdown(
+        """
+        <div class="header">
+          <div class="brand">
+            <div class="brand-logo">HR</div>
+            <div>
+              <div class="brand-title">HR ATS — Resume Screener</div>
+              <div class="brand-sub">AI-assisted shortlisting • Fast, auditable, exportable</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-def clean_text(text: str) -> str:
-    text = text.replace("\x00", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+# ---------------------------
+# Utility functions
+# ---------------------------
+def clean_text(inp: str) -> str:
+    if not isinstance(inp, str):
+        return ""
+    s = inp.replace("\x00", " ")
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
 
 
 def extract_text_from_pdf_file(file_obj) -> str:
     text = ""
-    with pdfplumber.open(file_obj) as pdf:
-        for page in pdf.pages:
-            page_text = page.extract_text() or ""
-            text += page_text + "\n"
+    try:
+        with pdfplumber.open(file_obj) as pdf:
+            for p in pdf.pages:
+                page_text = p.extract_text() or ""
+                text += page_text + "\n"
+    except Exception:
+        try:
+            raw = file_obj.read()
+            text = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            text = ""
     return text
 
 
-def groq_client(api_key: str) -> Groq:
-    return Groq(api_key=api_key)
+SCHEMA_KEYS = [
+    "match_score",
+    "candidate_name",
+    "current_organization",
+    "total_experience_years",
+    "relevant_experience_years",
+    "organization_names",
+    "top_strengths",
+    "critical_gaps",
+    "relevant_experience_summary",
+    "rationale_summary",
+    "education",
+    "academic_percentage",
+    "phone_number",
+]
 
 
-def generate_report(client: Groq, model_name: str, jd: str, resume: str) -> dict:
-    """
-    LLM must return JSON with schema:
+def llm_evaluate(provider: str, client: Any, model: str, jd: str, resume: str) -> Dict[str, Any]:
 
-    {
-      "match_score": 0-100,
-      "candidate_name": "string or null",
-      "current_organization": "string or null",
-      "total_experience_years": number,
-      "relevant_experience_years": "string",
-      "organization_names": ["string"],
-      "top_strengths": ["string"],
-      "critical_gaps": ["string"],
-      "relevant_experience_summary": "string",
-      "rationale_summary": "string",
-      "education": "string",
-      "academic_percentage": "float",
-      "phone_number": "string"
-    }
-    """
+    system_msg = (
+        "You are an expert HR resume screening assistant. Return STRICT JSON only with keys: " 
+        + ", ".join(SCHEMA_KEYS)
+        + ". If any field is missing, return empty string. "
+        "If timeline missing, set relevant_experience_years exactly to 'Specific timeline not mentioned'."
+    )
 
-    system_instruction = """
-You are an expert HR Resume Screening Agent.  
-Return your output STRICTLY as valid JSON with this schema:
-
-{
-  "match_score": 0-100,
-  "candidate_name": "string or null",
-  "current_organization": "string or null",
-  "total_experience_years": number,
-  "relevant_experience_years": "string",
-  "organization_names": ["string"],
-  "top_strengths": ["string"],
-  "critical_gaps": ["string"],
-  "relevant_experience_summary": "string",
-  "rationale_summary": "string",
-  "education": "string",
-  "academic_percentage": "float",
-  "phone_number": "string"
-}
-
-Rules:
-- If resume lacks timeline: "relevant_experience_years" MUST be exactly: "Specific timeline not mentioned"
-- "organization_names": must list only real companies mentioned.
-- No markdown. No comments. JSON only.
-"""
-
-    user_prompt = f"""
-Evaluate this candidate:
-
---- JOB DESCRIPTION ---
-{jd}
-
---- RESUME TEXT ---
-{resume}
-
-Output JSON only.
-"""
+    user_msg = f"Job Description:\n{jd}\n\nResume:\n{resume}\n\nReturn JSON only."
 
     messages = [
-        {"role": "system", "content": system_instruction},
-        {"role": "user", "content": user_prompt},
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
     ]
 
-    required_keys = [
-        "match_score",
-        "candidate_name",
-        "current_organization",
-        "total_experience_years",
-        "relevant_experience_years",
-        "organization_names",
-        "top_strengths",
-        "critical_gaps",
-        "relevant_experience_summary",
-        "rationale_summary",
-        "education",
-        "academic_percentage",
-        "phone_number"
-    ]
+    last_err = ""
 
-    for attempt in range(3):
+    for _ in range(3):
         try:
-            response = client.chat.completions.create(
-                model=model_name,
+            resp = client.chat.completions.create(
+                model=model,
                 messages=messages,
-                temperature=0.1,
+                temperature=0.06,
                 max_tokens=700,
             )
+            text = resp.choices[0].message.content.strip()
 
-            content = response.choices[0].message.content.strip()
+            if text.startswith("```"):
+                text = text.strip("`").replace("json", "").strip()
 
-            # Remove accidental markdown fences
-            if content.startswith("```"):
-                content = content.strip("`").replace("json", "").strip()
+            data = json.loads(text)
 
-            report = json.loads(content)
+            # fill missing keys
+            for k in SCHEMA_KEYS:
+                if k not in data:
+                    data[k] = ""
 
-            # Validate keys
-            if not all(k in report for k in required_keys):
-                raise ValueError("Missing required keys in JSON response")
-
-            return report
+            return data
 
         except Exception as e:
-            if attempt == 2:
-                return {"error": str(e)}
-            time.sleep(1)
+            last_err = str(e)
+            time.sleep(0.4)
+
+    return {"error": last_err}
 
 
+# ---------------------------
+# UI Layout
+# ---------------------------
+col_left, col_right = st.columns([2.4, 1])
 
-with st.sidebar:
-    st.header("⚙️ Settings")
+# --- Right panel ---
+with col_right:
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+    st.markdown("### Configuration", unsafe_allow_html=True)
 
-    default_key = os.getenv("GROQ_API_KEY", "")
+    provider = st.selectbox("Provider", ["Groq (Llama)", "OpenAI (ChatGPT)"])
 
-    api_key = st.text_input(
-        "Groq API Key",
-        value=default_key,
-        type="password",
-        help="Set GROQ_API_KEY in environment for auto-fill."
-    )
+    # API key field switches based on provider
+    env_var = "GROQ_API_KEY" if provider.startswith("Groq") else "OPENAI_API_KEY"
+    api_key = st.text_input("API Key", value=os.getenv(env_var, ""), type="password")
 
-    if api_key:
-        st.success("API key is set.")
+    # Model dropdown based on provider
+    if provider.startswith("Groq"):
+        model_choice = st.selectbox("Model", ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"])
     else:
-        st.error("No API key provided.")
+        model_choice = st.selectbox("Model", ["gpt-4.1-mini", "gpt-4o-mini"])
 
-    model_name = st.selectbox(
-        "Model",
-        ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"]
+    threshold = st.slider("Suitability threshold", 0, 100, 70, 5)
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# --- Left panel ---
+with col_left:
+    st.markdown('<div class="panel">', unsafe_allow_html=True)
+
+    st.markdown(
+        '<div style="display:flex;gap:16px;align-items:stretch;">',
+        unsafe_allow_html=True,
     )
 
-    suitable_threshold = st.slider(
-        "Suitability threshold (match score)",
-        min_value=0,
-        max_value=100,
-        value=70,
-        step=5,
-        help="Candidates with match_score ≥ threshold are marked Suitable = Yes."
-    )
+    # JD upload
+    st.markdown('<div style="flex:1">', unsafe_allow_html=True)
+    st.markdown('<div class="input-card">', unsafe_allow_html=True)
+    st.markdown('<div class="card-title">Job Description</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-desc">Upload JD (PDF or TXT)</div>', unsafe_allow_html=True)
+    jd_file = st.file_uploader("", type=["pdf", "txt"], key="jd_upload", label_visibility="collapsed")
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.caption("HR can paste the key here; on servers use environment variables.")
+    # Resume upload
+    st.markdown('<div style="width:360px">', unsafe_allow_html=True)
+    st.markdown('<div class="input-card">', unsafe_allow_html=True)
+    st.markdown('<div class="card-title">Candidate Resumes</div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-desc">Upload multiple resume PDFs</div>', unsafe_allow_html=True)
+    resumes = st.file_uploader("", type=["pdf"], accept_multiple_files=True, key="resumes", label_visibility="collapsed")
+    st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    st.markdown("</div>", unsafe_allow_html=True)
 
+    run_btn = st.button("Run screening")
 
-col1, col2 = st.columns(2)
-
-with col1:
-    jd_file = st.file_uploader("📄 Upload Job Description (PDF or TXT)", type=["pdf", "txt"])
-
-with col2:
-    resume_files = st.file_uploader(
-        "👥 Upload Resume PDFs (Multiple Allowed)",
-        type=["pdf"],
-        accept_multiple_files=True
-    )
-
-run_button = st.button("🚀 Run Screening")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
-
-
-
-if run_button:
+# ---------------------------
+# Run ATS Logic
+# ---------------------------
+if run_btn:
 
     if not api_key:
-        st.error("Please provide a Groq API key.")
+        st.error("Missing API key.")
         st.stop()
 
-    if not jd_file:
-        st.error("Upload a Job Description first.")
+    if jd_file is None:
+        st.error("Upload a Job Description.")
         st.stop()
 
-    if not resume_files:
+    if not resumes:
         st.error("Upload at least one resume.")
         st.stop()
 
-    client = groq_client(api_key)
+    # Create provider client
+    if provider.startswith("Groq"):
+        if Groq is None:
+            st.error("Groq SDK missing.")
+            st.stop()
+        client_obj = Groq(api_key=api_key)
+    else:
+        if OpenAI is None:
+            st.error("OpenAI SDK missing.")
+            st.stop()
+        client_obj = OpenAI(api_key=api_key)
 
     # Read JD
-    if jd_file.name.lower().endswith(".pdf"):
+    if jd_file.type == "application/pdf":
         jd_raw = extract_text_from_pdf_file(jd_file)
     else:
         jd_raw = jd_file.read().decode("utf-8", errors="ignore")
+
     jd_text = clean_text(jd_raw)
 
     results = []
-    progress = st.progress(0)
+    progress = st.progress(0.0)
     status = st.empty()
 
-    total = len(resume_files)
+    total = len(resumes)
 
-    for idx, file in enumerate(resume_files, start=1):
+    for idx, r in enumerate(resumes, 1):
+        status.info(f"Processing {idx}/{total}: {r.name}")
 
-        status.text(f"Processing {idx}/{total}: {file.name}")
-        progress.progress(idx / total)
+        resume_raw = extract_text_from_pdf_file(r)
+        resume_text = clean_text(resume_raw)
 
-        resume_text = clean_text(extract_text_from_pdf_file(file))
+        data = llm_evaluate(provider, client_obj, model_choice, jd_text, resume_text)
 
-        report = generate_report(client, model_name, jd_text, resume_text)
+        if "error" in data:
+            st.error(f"Error on {r.name}: {data['error']}")
+            score = 0
+            suitable = "No"
+        else:
+            score = float(data.get("match_score") or 0)
+            suitable = "Yes" if score >= threshold else "No"
 
-        if "error" in report:
-            st.error(f"Error in {file.name}: {report['error']}")
-            continue
-
-        match_score = report.get("match_score", 0)
-        suitable = "Yes" if match_score >= suitable_threshold else "No"
+        orgs = data.get("organization_names", [])
+        if isinstance(orgs, list):
+            orgs = "; ".join(orgs)
 
         results.append({
-            "resume_file": file.name,
-            "candidate_name": report["candidate_name"],
-            "current_organization": report["current_organization"],
-            "total_experience_years": report["total_experience_years"],
-            "relevant_experience_years": report["relevant_experience_years"],
-            "organization_names": "; ".join(report.get("organization_names", [])),
-            "match_score": match_score,
+            "resume_file": r.name,
+            "candidate_name": data.get("candidate_name", ""),
+            "current_organization": data.get("current_organization", ""),
+            "total_experience_years": data.get("total_experience_years", ""),
+            "relevant_experience_years": data.get("relevant_experience_years", ""),
+            "organization_names": orgs,
+            "match_score": score,
             "suitable": suitable,
-            "top_strengths": "; ".join(report.get("top_strengths", [])),
-            "critical_gaps": "; ".join(report.get("critical_gaps", [])),
-            "relevant_experience_summary": report["relevant_experience_summary"],
-            "rationale_summary": report["rationale_summary"],
-            "education": report["education"],
-            "academic_percentage": report["academic_percentage"],
-            "phone_number": report["phone_number"]
+            "top_strengths": "; ".join(data.get("top_strengths") or []),
+            "critical_gaps": "; ".join(data.get("critical_gaps") or []),
+            "relevant_experience_summary": data.get("relevant_experience_summary", ""),
+            "rationale_summary": data.get("rationale_summary", ""),
+            "education": data.get("education", ""),
+            "academic_percentage": data.get("academic_percentage", ""),
+            "phone_number": data.get("phone_number", ""),
         })
 
-    progress.empty()
-    status.text("Screening complete!")
+        progress.progress(idx / total)
 
-    if not results:
-        st.warning("No results to display.")
-        st.stop()
+    status.success("Screening complete.")
+    progress.empty()
 
     df = pd.DataFrame(results)
-    df_sorted = df.sort_values(by="match_score", ascending=False).reset_index(drop=True)
+    df_sorted = df.sort_values("match_score", ascending=False).reset_index(drop=True)
 
+    st.subheader("Screening Summary")
 
-    
-    st.subheader("📊 Ranked Screening Results (Summary)")
+    st.dataframe(
+        df_sorted[
+            [
+                "resume_file",
+                "candidate_name",
+                "current_organization",
+                "total_experience_years",
+                "organization_names",
+                "match_score",
+                "suitable",
+            ]
+        ],
+        use_container_width=True,
+        height=300
+    )
 
-    summary_cols = [
-        "resume_file",
-        "candidate_name",
-        "current_organization",
-        "total_experience_years",
-        "relevant_experience_years",
-        "organization_names",
-        "match_score",
-        "suitable",
-    ]
-
-    st.table(df_sorted[summary_cols])
-
-
-    
-    
-    st.subheader("🔍 Candidate Details")
-
+    st.subheader("Candidate Details")
     for _, row in df_sorted.iterrows():
-        label = row["candidate_name"] or row["resume_file"]
+        with st.expander(f"{row['candidate_name']} — Score {row['match_score']}"):
+            st.write(row)
 
-        with st.expander(f"{label}  |  Score: {row['match_score']}  |  Suitable: {row['suitable']}"):
-
-            st.markdown(f"**Resume file:** {row['resume_file']}")
-            st.markdown(f"**Suitable:** {row['suitable']}")
-            st.markdown(f"**Current organization:** {row['current_organization']}")
-            st.markdown(f"**Total experience (years):** {row['total_experience_years']}")
-            st.markdown(f"**Relevant experience (years):** {row['relevant_experience_years']}")
-            st.markdown(f"**Organizations:** {row['organization_names']}")
-            st.markdown(f"**Top strengths:** {row['top_strengths']}")
-            st.markdown(f"**Critical gaps:** {row['critical_gaps']}")
-            st.markdown(f"**Relevant experience summary:** {row['relevant_experience_summary']}")
-            st.markdown(f"**Rationale summary:** {row['rationale_summary']}")
-            st.markdown(f"**Education:** {row['education']}")
-            st.markdown(f"**Academic Percentage:** {row['academic_percentage']}")
-            st.markdown(f"**Phone Number:** {row['phone_number']}")
-
-
-   
-    
-    
+    # Export Excel
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df_sorted.to_excel(writer, index=False)
 
     st.download_button(
-        label="⬇️ Download Excel",
+        "Download Excel",
         data=buf.getvalue(),
-        file_name="hr_screening_results.xlsx",
-        mime="application/vnd.ms-excel"
+        file_name="ats_results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
