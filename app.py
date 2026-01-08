@@ -37,49 +37,24 @@ st.set_page_config(
 )
 
 # ---------------------------
-# Professional styling 
+# Styling
 # ---------------------------
 st.markdown(
     """
     <style>
-    :root {
-        --bg: #0b1220;
-        --card: #0f1724;
-        --muted: #9aa4b2;
-        --accent: #5661f9;
-        --accent-2: #07b59b;
-        --surface-2: #111827;
-        --white: #eef2ff;
-    }
-
-    .stApp {
-        background: linear-gradient(180deg, var(--bg) 0%, #041023 100%);
-        color: var(--white);
-        font-family: Inter, "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont;
-    }
-
     .panel {
-        background: var(--card);
+        background: #0f1724;
         border-radius: 12px;
         padding: 18px;
         border: 1px solid rgba(255,255,255,0.03);
         box-shadow: 0 10px 30px rgba(2,6,23,0.6);
     }
-
-    .input-card {
-        background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
-        border-radius: 10px;
-        padding: 14px;
-        border: 1px solid rgba(255,255,255,0.03);
-    }
-
     .stButton>button {
-        background: linear-gradient(90deg, var(--accent), #15b1e6);
+        background: linear-gradient(90deg, #5661f9, #15b1e6);
         color: white;
         font-weight: 600;
         padding: 8px 14px;
         border-radius: 10px;
-        box-shadow: 0 8px 26px rgba(86,97,249,0.16);
     }
     </style>
     """,
@@ -159,7 +134,7 @@ SCHEMA_KEYS = [
 
 def llm_evaluate(provider: str, client: Any, model: str, jd: str, resume: str) -> Dict[str, Any]:
     system_msg = (
-        "You are an expert HR resume screening assistant. Return STRICT JSON only with keys: " 
+        "You are an expert HR resume screening assistant. Return STRICT JSON only with keys: "
         + ", ".join(SCHEMA_KEYS)
         + ". If any field is missing, return empty string. "
         "If timeline missing, set relevant_experience_years exactly to 'Specific timeline not mentioned'."
@@ -257,7 +232,7 @@ with col_left:
     resumes = st.file_uploader("Upload resumes", type=["pdf", "doc", "docx", "txt"], accept_multiple_files=True)
 
     st.markdown("### Critical / Must-Have Skills")
-    critical_skills_input = st.text_input("Comma separated (e.g., Kubernetes, Docker, GCP)")
+    critical_skills_input = st.text_input("Add the skills (e.g., Kubernetes, Docker, GCP)")
 
     run_btn = st.button("Run screening")
     st.markdown("</div>", unsafe_allow_html=True)
@@ -312,17 +287,24 @@ if run_btn:
         data = llm_evaluate(provider, client_obj, model_choice, jd_text, resume_text)
 
         if "error" in data:
-            score = 0
+            raw_score = 0.0
             suitable = "No"
         else:
-            score = float(data.get("match_score") or 0)
-            suitable = "Yes" if score >= threshold else "No"
+            raw_score = float(data.get("match_score") or 0)
+            suitable = "Yes" if raw_score >= threshold else "No"
 
+        # Apply Critical Skill penalty
         if critical_skills:
-            score, meets_critical, missing_skills = apply_critical_skill_penalty(score, resume_text, critical_skills)
+            raw_score, meets_critical, missing_skills = apply_critical_skill_penalty(
+                raw_score, resume_text, critical_skills
+            )
             if not meets_critical:
                 suitable = "No"
                 data["critical_gaps"] = list(set((data.get("critical_gaps") or []) + missing_skills))
+
+        # Final formatted score
+        score = round(raw_score, 2)
+        matching_percentage = f"{score:.2f}%"
 
         orgs = data.get("organization_names", [])
         if isinstance(orgs, list):
@@ -336,6 +318,7 @@ if run_btn:
             "relevant_experience_years": data.get("relevant_experience_years", ""),
             "organization_names": orgs,
             "match_score": score,
+            "matching_percentage": matching_percentage,
             "suitable": suitable,
             "top_strengths": "; ".join(data.get("top_strengths") or []),
             "critical_gaps": "; ".join(data.get("critical_gaps") or []),
@@ -349,7 +332,7 @@ if run_btn:
     df_sorted = pd.DataFrame(results).sort_values("match_score", ascending=False).reset_index(drop=True)
 
     # ---------------------------
-    # MARKDOWN TABLE SUMMARY
+    # SUMMARY TABLE
     # ---------------------------
     st.subheader("Screening Summary")
 
@@ -361,28 +344,29 @@ if run_btn:
             "total_experience_years",
             "organization_names",
             "match_score",
+            "matching_percentage",
             "suitable",
-         ]
+        ]
     ].rename(columns={
         "resume_file": "Resume File",
         "candidate_name": "Candidate",
         "current_organization": "Organization",
         "total_experience_years": "Total Exp",
         "organization_names": "Organizations",
-        "match_score": "Score",
+        "match_score": "Resume Score",
+        "matching_percentage": "Matching %",
         "suitable": "Suitable",
     })
 
     st.table(summary_df)
 
-
     # ---------------------------
-    # MARKDOWN DETAILS PER CANDIDATE
+    # CANDIDATE DETAILS
     # ---------------------------
     st.subheader("Candidate Details")
 
     for _, row in df_sorted.iterrows():
-        st.markdown(f"## {row['candidate_name']} — Score {row['match_score']}")
+        st.markdown(f"## {row['candidate_name']} — Score {row['match_score']:.2f}")
 
         details_md = f"""
 | Field | Value |
@@ -392,6 +376,8 @@ if run_btn:
 | Total Experience | {row['total_experience_years']} |
 | Relevant Experience | {row['relevant_experience_years']} |
 | Organizations | {row['organization_names']} |
+| Resume Score | {row['match_score']:.2f} |
+| Matching Percentage | {row['matching_percentage']} |
 | Suitable | {row['suitable']} |
 | Education | {row['education']} |
 | Academic Percentage | {row['academic_percentage']} |
@@ -408,12 +394,43 @@ if run_btn:
         st.markdown("### Relevant Experience Summary")
         st.markdown(row["relevant_experience_summary"])
 
-        st.markdown("### Recruiter Rationale")
-        st.markdown(row["rationale_summary"])
+        # ---------------------------
+        # FINAL RECRUITER EVALUATION
+        # ---------------------------
+        st.markdown("### 🎯 Final Recruiter Evaluation")
 
+        strengths = row["top_strengths"] if row["top_strengths"] else "Not specified"
+        gaps = row["critical_gaps"] if row["critical_gaps"] else "None"
+
+        if row["suitable"] == "Yes":
+            recommendation = "→ Proceed to Technical Round"
+        elif row["match_score"] >= 50:
+            recommendation = "→ Hold for Review"
+        else:
+            recommendation = "→ Not Recommended"
+
+        evaluation_md = f"""
+**Final Score:** {row["match_score"]:.2f}  
+**Matching Percentage:** {row["matching_percentage"]}
+
+**Summary:**  
+{row["rationale_summary"]}
+
+**Key Strengths:**  
+{strengths}
+
+**Gaps Identified:**  
+{gaps}
+
+**Recommendation:**  
+{recommendation}
+"""
+        st.markdown(evaluation_md)
         st.markdown("---")
 
-    # Export Excel
+    # ---------------------------
+    # EXPORT
+    # ---------------------------
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df_sorted.to_excel(writer, index=False)
