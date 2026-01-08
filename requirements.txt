@@ -1,5 +1,11 @@
 streamlit
-groq
-pdfplumber
 pandas
+numpy
+pdfplumber
 openpyxl
+python-docx
+pillow
+altair
+groq
+openai
+opencv-python-headless
